@@ -288,6 +288,76 @@ class DatabaseManager:
                 "created_at": user[22],
                 "updated_at": user[23]
             }
+    
+    async def create_session(self, user_id: int, session_token: str, expires_at) -> bool:
+        """Create a new session for a user"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO user_sessions (user_id, session_token, expires_at)
+                    VALUES (?, ?, ?)
+                ''', (user_id, session_token, expires_at.isoformat()))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"Error creating session: {e}")
+            return False
+
+    async def get_session(self, session_token: str) -> Optional[Dict]:
+        """Get session data by token"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute('''
+                    SELECT s.*, u.name, u.email
+                    FROM user_sessions s
+                    JOIN users u ON s.user_id = u.id
+                    WHERE s.session_token = ?
+                ''', (session_token,))
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            print(f"Error getting session: {e}")
+            return None
+
+    async def delete_session(self, session_token: str) -> bool:
+        """Delete a session"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    DELETE FROM user_sessions WHERE session_token = ?
+                ''', (session_token,))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"Error deleting session: {e}")
+            return False
+
+    async def delete_user_sessions(self, user_id: int) -> bool:
+        """Delete all sessions for a user"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    DELETE FROM user_sessions WHERE user_id = ?
+                ''', (user_id,))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"Error deleting user sessions: {e}")
+            return False
+
+    async def cleanup_expired_sessions(self) -> bool:
+        """Clean up expired sessions"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    DELETE FROM user_sessions WHERE expires_at < ?
+                ''', (datetime.now().isoformat(),))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"Error cleaning up expired sessions: {e}")
+            return False
 
 # Global database manager instance
 db_manager = DatabaseManager()

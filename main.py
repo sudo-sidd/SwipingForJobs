@@ -1,14 +1,16 @@
 import os
 import logging
 import json
-from datetime import datetime, timedelta
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 import httpx
 from google import genai
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request, Cookie
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -88,11 +90,78 @@ class JobApplication(BaseModel):
     job_source: str
     job_url: str = ""
 
-# Startup event to initialize database
-@app.on_event("startup")
-async def startup_event():
-    await db_manager.init_database()
-    logger.info("Database initialized successfully")
+class SessionData(BaseModel):
+    user_id: int
+    email: str
+    name: str
+    expires_at: datetime
+
+# Security setup
+security = HTTPBearer(auto_error=False)
+
+# Session management functions
+def generate_session_token() -> str:
+    """Generate a secure session token"""
+    return secrets.token_urlsafe(32)
+
+async def create_session(user_id: int) -> Dict[str, Any]:
+    """Create a new session for a user"""
+    session_token = generate_session_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)  # 7 days expiration
+    
+    await db_manager.create_session(user_id, session_token, expires_at)
+    
+    return {
+        "session_token": session_token,
+        "expires_at": expires_at.isoformat()
+    }
+
+async def get_current_user(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[Dict[str, Any]]:
+    """Get current user from session token"""
+    session_token = None
+    
+    # Try to get token from Authorization header
+    if credentials:
+        session_token = credentials.credentials
+    
+    # Try to get token from cookie as fallback
+    if not session_token:
+        session_token = request.cookies.get("session_token")
+    
+    if not session_token:
+        return None
+    
+    try:
+        session_data = await db_manager.get_session(session_token)
+        if not session_data:
+            return None
+        
+        # Check if session is expired
+        expires_at_str = session_data["expires_at"]
+        if isinstance(expires_at_str, str):
+            expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+        else:
+            expires_at = datetime.fromisoformat(str(expires_at_str))
+            
+        # Ensure both datetimes have timezone info for comparison
+        now = datetime.now(timezone.utc)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+            
+        if expires_at < now:
+            await db_manager.delete_session(session_token)
+            return None
+        
+        return session_data
+    except Exception as e:
+        logger.error(f"Error getting current user: {str(e)}")
+        return None
+
+async def require_auth(current_user: Optional[Dict[str, Any]] = Depends(get_current_user)) -> Dict[str, Any]:
+    """Dependency that requires authentication"""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return current_user
 
 async def process_resume_with_gemini(file_path: str) -> Dict[str, Any]:
     """Process resume file using Gemini AI to extract information"""
@@ -218,6 +287,39 @@ async def extract_linkedin_github_info(linkedin_url: str = "", github_url: str =
         logger.error(f"Error extracting LinkedIn/GitHub info: {str(e)}")
         return {"linkedin_data": "", "github_data": ""}
 
+# Startup event to initialize database
+@app.on_event("startup")
+async def startup_event():
+    await db_manager.init_database()
+    # Clean up expired sessions on startup
+    await db_manager.cleanup_expired_sessions()
+    logger.info("Database initialized successfully")
+
+# Scheduled task to clean up expired sessions periodically
+import asyncio
+from threading import Thread
+
+def cleanup_sessions_periodically():
+    """Background task to clean up expired sessions"""
+    async def cleanup_loop():
+        while True:
+            try:
+                await db_manager.cleanup_expired_sessions()
+                logger.info("Cleaned up expired sessions")
+            except Exception as e:
+                logger.error(f"Error cleaning up sessions: {e}")
+            # Wait 1 hour before next cleanup
+            await asyncio.sleep(3600)
+    
+    # Run in background
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(cleanup_loop())
+
+# Start cleanup thread
+cleanup_thread = Thread(target=cleanup_sessions_periodically, daemon=True)
+cleanup_thread.start()
+
 @app.get("/")
 async def root():
     """Root endpoint"""
@@ -301,6 +403,9 @@ async def login_user(login_data: UserLogin):
         
         logger.info(f"User logged in: {user['email']}")
         
+        # Create session for the user
+        session_data = await create_session(user["id"])
+        
         return {
             "message": "Login successful",
             "user": {
@@ -326,6 +431,10 @@ async def login_user(login_data: UserLogin):
                 "resume_processed_data": user["resume_processed_data"],
                 "profile_completed": user["profile_completed"],
                 "has_resume": bool(user["resume_filename"])
+            },
+            "session": {
+                "token": session_data["session_token"],
+                "expires_at": session_data["expires_at"]
             }
         }
         
@@ -336,9 +445,13 @@ async def login_user(login_data: UserLogin):
         raise HTTPException(status_code=500, detail="Login failed")
 
 @app.get("/users/profile/{user_id}")
-async def get_user_profile(user_id: int):
-    """Get user profile by ID"""
+async def get_user_profile(user_id: int, current_user: Dict[str, Any] = Depends(require_auth)):
+    """Get user profile by ID (authenticated users only)"""
     try:
+        # Users can only view their own profile
+        if current_user["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
         profile = await db_manager.get_user_profile(user_id)
         
         if not profile:
@@ -352,16 +465,27 @@ async def get_user_profile(user_id: int):
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Get profile error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get user profile")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
         logger.error(f"Error retrieving profile: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve profile")
 
 @app.put("/users/profile/{user_id}")
 async def update_user_profile(
     user_id: int,
-    profile_data: UserProfileUpdate
+    profile_data: UserProfileUpdate,
+    current_user: Dict[str, Any] = Depends(require_auth)
 ):
-    """Update user profile"""
+    """Update user profile (authenticated users only)"""
     try:
+        # Users can only update their own profile
+        if current_user["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
         # Convert to dict and handle preferences
         update_data = profile_data.dict()
         
@@ -386,9 +510,13 @@ async def update_user_profile(
         raise HTTPException(status_code=500, detail="Failed to update profile")
 
 @app.post("/users/process-resume/{user_id}")
-async def process_user_resume(user_id: int):
-    """Process/reprocess user's resume with Gemini AI"""
+async def process_user_resume(user_id: int, current_user: Dict[str, Any] = Depends(require_auth)):
+    """Process/reprocess user's resume with Gemini AI (authenticated users only)"""
     try:
+        # Users can only process their own resume
+        if current_user["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
         # Get user profile to find resume path
         profile = await db_manager.get_user_profile(user_id)
         
@@ -462,9 +590,13 @@ async def process_user_resume(user_id: int):
         raise HTTPException(status_code=500, detail="Failed to process resume")
 
 @app.post("/users/apply")
-async def apply_to_job(application: JobApplication):
-    """Record job application"""
+async def apply_to_job(application: JobApplication, current_user: Dict[str, Any] = Depends(require_auth)):
+    """Record job application (authenticated users only)"""
     try:
+        # Verify the user is applying for themselves
+        if current_user["user_id"] != application.user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
         success = await db_manager.record_job_application(
             user_id=application.user_id,
             user_email=application.user_email,
@@ -492,9 +624,13 @@ async def apply_to_job(application: JobApplication):
         raise HTTPException(status_code=500, detail="Failed to record application")
 
 @app.get("/users/applications/{user_id}")
-async def get_user_applications(user_id: int):
-    """Get all applications for a user"""
+async def get_user_applications(user_id: int, current_user: Dict[str, Any] = Depends(require_auth)):
+    """Get all applications for a user (authenticated users only)"""
     try:
+        # Users can only view their own applications
+        if current_user["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
         applications = await db_manager.get_user_applications(user_id)
         
         return {
@@ -502,6 +638,8 @@ async def get_user_applications(user_id: int):
             "count": len(applications)
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching applications: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to fetch applications")
@@ -730,6 +868,63 @@ async def get_all_jobs():
     
     return results
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.post("/auth/logout")
+async def logout_user(current_user: Dict[str, Any] = Depends(require_auth), session_token: str = Cookie(None)):
+    """Logout user and invalidate session"""
+    try:
+        # Get session token from authorization header or cookie
+        token = session_token
+        if not token and hasattr(current_user, 'session_token'):
+            token = current_user.get('session_token')
+        
+        if token:
+            await db_manager.delete_session(token)
+        
+        return {"message": "Logged out successfully"}
+        
+    except Exception as e:
+        logger.error(f"Logout error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Logout failed")
+
+@app.get("/auth/me")
+async def get_current_user_info(current_user: Dict[str, Any] = Depends(require_auth)):
+    """Get current authenticated user information"""
+    try:
+        user = await db_manager.get_user_profile(current_user["user_id"])
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "user": user,
+            "session": {
+                "expires_at": current_user["expires_at"]
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get current user error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get user info")
+
+@app.post("/auth/refresh")
+async def refresh_session(current_user: Dict[str, Any] = Depends(require_auth)):
+    """Refresh user session"""
+    try:
+        # Delete old session
+        if hasattr(current_user, 'session_token'):
+            await db_manager.delete_session(current_user['session_token'])
+        
+        # Create new session
+        session_info = await create_session(current_user["user_id"])
+        
+        return {
+            "message": "Session refreshed successfully",
+            "session": {
+                "token": session_info["session_token"],
+                "expires_at": session_info["expires_at"]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Refresh session error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to refresh session")

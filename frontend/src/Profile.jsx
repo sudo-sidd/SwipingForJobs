@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import sessionManager from './sessionManager'
 
 const API_BASE_URL = 'http://localhost:8000'
 
@@ -50,7 +51,20 @@ const Profile = ({ userData, onBack, onUpdate }) => {
 
   const fetchApplications = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/users/applications/${userData.id}`)
+      if (!sessionManager.isLoggedIn()) {
+        console.error('Not authenticated')
+        return
+      }
+      
+      const response = await fetch(`${API_BASE_URL}/users/applications/${userData.id}`, {
+        headers: sessionManager.getAuthHeaders()
+      })
+      
+      if (response.status === 401) {
+        console.error('Session expired')
+        return
+      }
+      
       if (response.ok) {
         const data = await response.json()
         setApplications(data.applications)
@@ -98,14 +112,20 @@ const Profile = ({ userData, onBack, onUpdate }) => {
       const response = await fetch(`${API_BASE_URL}/users/profile/${userData.id}`, {
         method: 'PUT',
         headers: {
-          'Content-Type': 'application/json',
+          ...sessionManager.getAuthHeaders()
         },
         body: JSON.stringify(updateData)
       })
 
+      if (response.status === 401) {
+        alert('Session expired. Please log in again.')
+        return
+      }
+
       if (response.ok) {
         const result = await response.json()
         onUpdate(result.user) // Update parent component with new data
+        sessionManager.updateUser(result.user) // Update session storage
         setEditing(false)
       } else {
         throw new Error('Failed to update profile')
@@ -123,15 +143,19 @@ const Profile = ({ userData, onBack, onUpdate }) => {
     try {
       const response = await fetch(`${API_BASE_URL}/users/process-resume/${userData.id}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        }
+        headers: sessionManager.getAuthHeaders()
       })
+
+      if (response.status === 401) {
+        alert('Session expired. Please log in again.')
+        return
+      }
 
       if (response.ok) {
         const result = await response.json()
         setResumeData(result.processed_data)
         onUpdate(result.user) // Update parent component with new data
+        sessionManager.updateUser(result.user) // Update session storage
         alert('Resume processed successfully! Check your profile for extracted information.')
       } else {
         const error = await response.json()

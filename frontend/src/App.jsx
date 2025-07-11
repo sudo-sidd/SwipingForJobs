@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import Profile from './Profile'
+import sessionManager from './sessionManager'
 
 const API_BASE_URL = 'http://localhost:8000'
 
@@ -108,7 +109,7 @@ const JobCard = ({ job, onApply }) => {
 
 // Main App component
 const App = () => {
-  const [currentScreen, setCurrentScreen] = useState('login') // 'login' | 'register' | 'jobs' | 'profile'
+  const [currentScreen, setCurrentScreen] = useState('loading') // Start with loading state
   const [userData, setUserData] = useState({
     id: null,
     name: '',
@@ -130,7 +131,163 @@ const App = () => {
   const [registering, setRegistering] = useState(false)
   const [toast, setToast] = useState(null)
   const [formErrors, setFormErrors] = useState({})
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [initializing, setInitializing] = useState(true)
   const fileInputRef = useRef(null)
+
+  // Check authentication status on app load
+  useEffect(() => {
+    const checkAuthStatus = async () => {
+      try {
+        console.log('Checking authentication status...')
+        
+        // First check if we have any session data at all
+        const token = sessionManager.getToken()
+        const user = sessionManager.getUser()
+        
+        if (!token || !user) {
+          console.log('No session data found')
+          setIsAuthenticated(false)
+          setCurrentScreen('login')
+          setInitializing(false)
+          return
+        }
+        
+        console.log('Found session data, validating with server...')
+        
+        // Verify session with server
+        const isValid = await sessionManager.checkAndRefreshSession()
+        if (isValid) {
+          const currentUser = sessionManager.getUser()
+          console.log('Session verified, restoring user:', currentUser)
+          
+          setUserData({
+            id: currentUser.id,
+            name: currentUser.name,
+            email: currentUser.email,
+            linkedinUrl: currentUser.linkedin_url || '',
+            githubUrl: currentUser.github_url || '',
+            portfolioUrl: currentUser.portfolio_url || '',
+            phoneNumber: currentUser.phone_number || '',
+            location: currentUser.location || '',
+            bio: currentUser.bio || '',
+            skills: currentUser.skills || '',
+            preferences: currentUser.preferences || [],
+            workMode: currentUser.work_mode || 'remote',
+            experienceLevel: currentUser.experience_level || 'entry',
+            salaryMin: currentUser.salary_min,
+            salaryMax: currentUser.salary_max,
+            currency: currentUser.currency || 'USD',
+            resume: null,
+            resume_filename: currentUser.resume_filename || '',
+            loginCode: '',
+            hasResume: currentUser.has_resume || false,
+            linkedinData: currentUser.linkedin_data || '',
+            githubData: currentUser.github_data || '',
+            resumeProcessedData: currentUser.resume_processed_data || '',
+            profileCompleted: currentUser.profile_completed || false
+          })
+          
+          setIsAuthenticated(true)
+          setCurrentScreen('jobs')
+          console.log('User restored successfully')
+        } else {
+          console.log('Session validation failed, clearing session')
+          sessionManager.clearSession()
+          setIsAuthenticated(false)
+          setCurrentScreen('login')
+        }
+      } catch (error) {
+        console.error('Error checking auth status:', error)
+        sessionManager.clearSession()
+        setIsAuthenticated(false)
+        setCurrentScreen('login')
+      } finally {
+        setInitializing(false)
+      }
+    }
+
+    checkAuthStatus()
+  }, [])
+
+  // Auto-refresh session periodically
+  useEffect(() => {
+    if (isAuthenticated) {
+      const interval = setInterval(async () => {
+        const isValid = await sessionManager.checkAndRefreshSession()
+        if (!isValid) {
+          showToast('Your session has expired. Please log in again.', 'error')
+          handleLogout()
+        } else if (sessionManager.isSessionExpiringSoon()) {
+          const timeLeft = sessionManager.getTimeUntilExpiry()
+          showToast(`Your session will expire in ${timeLeft} minutes`, 'info')
+        }
+      }, 5 * 60 * 1000) // Check every 5 minutes
+
+      return () => clearInterval(interval)
+    }
+  }, [isAuthenticated])
+
+  // Check for session expiry warnings more frequently
+  useEffect(() => {
+    if (isAuthenticated) {
+      const warningInterval = setInterval(() => {
+        if (sessionManager.isSessionExpiringSoon()) {
+          const timeLeft = sessionManager.getTimeUntilExpiry()
+          if (timeLeft <= 5) {
+            showToast(`Session expires in ${timeLeft} minutes! Activity will extend it.`, 'error')
+          } else if (timeLeft <= 15) {
+            showToast(`Session expires in ${timeLeft} minutes`, 'info')
+          }
+        }
+      }, 60 * 1000) // Check every minute
+
+      return () => clearInterval(warningInterval)
+    }
+  }, [isAuthenticated])
+
+  // Track user activity to extend session
+  useEffect(() => {
+    if (isAuthenticated) {
+      let activityTimer
+      
+      const resetActivityTimer = () => {
+        clearTimeout(activityTimer)
+        activityTimer = setTimeout(async () => {
+          // User has been inactive, check session
+          const isValid = await sessionManager.checkAndRefreshSession()
+          if (!isValid) {
+            showToast('Session expired due to inactivity', 'error')
+            handleLogout()
+          }
+        }, 30 * 60 * 1000) // 30 minutes of inactivity
+      }
+
+      const handleActivity = () => {
+        resetActivityTimer()
+        // Refresh session if it's close to expiring
+        if (sessionManager.isSessionExpiringSoon()) {
+          sessionManager.checkAndRefreshSession()
+        }
+      }
+
+      // Listen for user activity
+      document.addEventListener('mousedown', handleActivity)
+      document.addEventListener('keydown', handleActivity)
+      document.addEventListener('scroll', handleActivity)
+      document.addEventListener('touchstart', handleActivity)
+
+      resetActivityTimer()
+
+      return () => {
+        clearTimeout(activityTimer)
+        document.removeEventListener('mousedown', handleActivity)
+        document.removeEventListener('keydown', handleActivity)
+        document.removeEventListener('scroll', handleActivity)
+        document.removeEventListener('touchstart', handleActivity)
+      }
+    }
+  }, [isAuthenticated])
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type })
@@ -138,6 +295,25 @@ const App = () => {
 
   const closeToast = () => {
     setToast(null)
+  }
+
+  const handleLogout = () => {
+    sessionManager.clearSession()
+    setIsAuthenticated(false)
+    setUserData({
+      id: null,
+      name: '',
+      email: '',
+      linkedinUrl: '',
+      githubUrl: '',
+      skills: '',
+      preferences: [],
+      resume: null,
+      loginCode: '',
+      hasResume: false
+    })
+    setCurrentScreen('login')
+    showToast('Logged out successfully', 'info')
   }
 
   const validateLoginForm = () => {
@@ -330,6 +506,15 @@ const App = () => {
       console.log('Login result:', result)
       const user = result.user
       
+      // Store session data
+      if (result.session) {
+        sessionManager.setSession(
+          result.session.token,
+          user,
+          result.session.expires_at
+        )
+      }
+      
       // Update user data from login response
       setUserData({
         id: user.id,
@@ -358,6 +543,7 @@ const App = () => {
         profileCompleted: user.profile_completed || false
       })
       
+      setIsAuthenticated(true)
       showToast(`Welcome back, ${user.name}!`, 'success')
       setCurrentScreen('jobs')
       await fetchJobs()
@@ -461,6 +647,12 @@ const App = () => {
 
   const handleApply = async (job) => {
     try {
+      // Check if user is authenticated
+      if (!isAuthenticated || !sessionManager.isLoggedIn()) {
+        showToast('Please log in to apply for jobs', 'error')
+        return
+      }
+
       // Record job application in backend
       const applicationData = {
         user_id: userData.id,
@@ -474,12 +666,17 @@ const App = () => {
       const response = await fetch(`${API_BASE_URL}/users/apply`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          ...sessionManager.getAuthHeaders()
         },
         body: JSON.stringify(applicationData)
       })
       
       if (!response.ok) {
+        if (response.status === 401) {
+          showToast('Session expired. Please log in again.', 'error')
+          handleLogout()
+          return
+        }
         throw new Error('Failed to record application')
       }
       
@@ -554,24 +751,38 @@ const App = () => {
         />
       )}
 
-      {/* Header */}
-      <header className="bg-white shadow-sm border-b">
-        <div className="max-w-md mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold text-gray-900">
-              SwipingForJobs
-            </h1>
-            {currentScreen === 'jobs' && (
-              <div className="flex items-center space-x-4">
-                <button
-                  onClick={switchToProfile}
-                  className="text-primary-600 hover:text-primary-700 font-medium text-sm"
-                >
-                  Profile
-                </button>
-                <button
-                  onClick={handleBackToForm}
-                  className="text-primary-600 hover:text-primary-700 font-medium text-sm"
+      {/* Show loading screen during initialization */}
+      {initializing && (
+        <div className="min-h-screen flex items-center justify-center">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-600 mx-auto mb-4"></div>
+            <h2 className="text-xl font-semibold text-gray-700 mb-2">SwipingForJobs</h2>
+            <p className="text-gray-500">Loading your session...</p>
+          </div>
+        </div>
+      )}
+
+      {/* Main app content */}
+      {!initializing && (
+        <>
+          {/* Header */}
+          <header className="bg-white shadow-sm border-b">
+            <div className="max-w-md mx-auto px-4 py-4">
+              <div className="flex items-center justify-between">
+                <h1 className="text-2xl font-bold text-gray-900">
+                  SwipingForJobs
+                </h1>
+                {currentScreen === 'jobs' && (
+                  <div className="flex items-center space-x-4">
+                    <button
+                      onClick={switchToProfile}
+                      className="text-primary-600 hover:text-primary-700 font-medium text-sm"
+                    >
+                      Profile
+                    </button>
+                    <button
+                      onClick={handleLogout}
+                      className="text-primary-600 hover:text-primary-700 font-medium text-sm"
                 >
                   Logout
                 </button>
@@ -921,6 +1132,8 @@ const App = () => {
           </div>
         )}
       </main>
+        </>
+      )}
     </div>
   )
 }
