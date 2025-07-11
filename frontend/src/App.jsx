@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react'
+import Profile from './Profile'
 
 const API_BASE_URL = 'http://localhost:8000'
 
@@ -107,7 +108,7 @@ const JobCard = ({ job, onApply }) => {
 
 // Main App component
 const App = () => {
-  const [currentScreen, setCurrentScreen] = useState('login') // 'login' | 'register' | 'jobs'
+  const [currentScreen, setCurrentScreen] = useState('login') // 'login' | 'register' | 'jobs' | 'profile'
   const [userData, setUserData] = useState({
     id: null,
     name: '',
@@ -336,11 +337,25 @@ const App = () => {
         email: user.email,
         linkedinUrl: user.linkedin_url,
         githubUrl: user.github_url,
+        portfolioUrl: user.portfolio_url || '',
+        phoneNumber: user.phone_number || '',
+        location: user.location || '',
+        bio: user.bio || '',
         skills: user.skills,
         preferences: user.preferences,
+        workMode: user.work_mode || 'remote',
+        experienceLevel: user.experience_level || 'entry',
+        salaryMin: user.salary_min,
+        salaryMax: user.salary_max,
+        currency: user.currency || 'USD',
         resume: null,
+        resume_filename: user.resume_filename || '',
         loginCode: loginData.loginCode,
-        hasResume: user.has_resume
+        hasResume: user.has_resume,
+        linkedinData: user.linkedin_data || '',
+        githubData: user.github_data || '',
+        resumeProcessedData: user.resume_processed_data || '',
+        profileCompleted: user.profile_completed || false
       })
       
       showToast(`Welcome back, ${user.name}!`, 'success')
@@ -505,6 +520,18 @@ const App = () => {
     // Only clear it when explicitly logging out
   }
 
+  const switchToProfile = () => {
+    setCurrentScreen('profile')
+  }
+
+  const handleProfileUpdate = (updatedUser) => {
+    // Update the userData with the new profile information
+    setUserData(prev => ({
+      ...prev,
+      ...updatedUser
+    }))
+  }
+
   const preferenceOptions = [
     { id: 'frontend', label: 'Frontend Development', icon: '🎨' },
     { id: 'backend', label: 'Backend Development', icon: '⚙️' },
@@ -535,12 +562,20 @@ const App = () => {
               SwipingForJobs
             </h1>
             {currentScreen === 'jobs' && (
-              <button
-                onClick={handleBackToForm}
-                className="text-primary-600 hover:text-primary-700 font-medium text-sm"
-              >
-                ← Logout
-              </button>
+              <div className="flex items-center space-x-4">
+                <button
+                  onClick={switchToProfile}
+                  className="text-primary-600 hover:text-primary-700 font-medium text-sm"
+                >
+                  Profile
+                </button>
+                <button
+                  onClick={handleBackToForm}
+                  className="text-primary-600 hover:text-primary-700 font-medium text-sm"
+                >
+                  Logout
+                </button>
+              </div>
             )}
             {currentScreen === 'register' && (
               <button
@@ -838,6 +873,13 @@ const App = () => {
               </p>
             </div>
           </div>
+        ) : currentScreen === 'profile' ? (
+          /* Profile Page */
+          <Profile 
+            userData={userData}
+            onBack={() => setCurrentScreen('jobs')}
+            onUpdate={handleProfileUpdate}
+          />
         ) : (
           /* Jobs Feed */
           <div>

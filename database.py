@@ -28,10 +28,23 @@ class DatabaseManager:
                     login_code TEXT UNIQUE NOT NULL,
                     linkedin_url TEXT,
                     github_url TEXT,
+                    portfolio_url TEXT,
+                    phone_number TEXT,
+                    location TEXT,
+                    bio TEXT,
                     skills TEXT NOT NULL,
                     preferences TEXT NOT NULL,  -- JSON string
+                    work_mode TEXT DEFAULT 'remote',  -- remote, hybrid, onsite
+                    experience_level TEXT DEFAULT 'entry',  -- entry, junior, mid, senior
+                    salary_min INTEGER,
+                    salary_max INTEGER,
+                    currency TEXT DEFAULT 'USD',
                     resume_filename TEXT,
                     resume_path TEXT,
+                    linkedin_data TEXT,  -- JSON string of LinkedIn profile data
+                    github_data TEXT,    -- JSON string of GitHub profile data
+                    resume_processed_data TEXT,  -- JSON string of processed resume data
+                    profile_completed BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -87,7 +100,8 @@ class DatabaseManager:
     
     async def create_user(self, name: str, email: str, linkedin_url: str, github_url: str, 
                          skills: str, preferences: List[str], resume_filename: str = "", 
-                         resume_path: str = "") -> Dict:
+                         resume_path: str = "", linkedin_data: str = "", github_data: str = "",
+                         resume_processed_data: str = "", **kwargs) -> Dict:
         """Create a new user with auto-generated login code"""
         async with aiosqlite.connect(self.db_path) as db:
             # Generate unique login code
@@ -109,10 +123,12 @@ class DatabaseManager:
             try:
                 cursor = await db.execute('''
                     INSERT INTO users (name, email, password_hash, login_code, linkedin_url, 
-                                     github_url, skills, preferences, resume_filename, resume_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     github_url, skills, preferences, resume_filename, resume_path,
+                                     linkedin_data, github_data, resume_processed_data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (name, email, password_hash, login_code, linkedin_url, github_url, 
-                      skills, preferences_json, resume_filename, resume_path))
+                      skills, preferences_json, resume_filename, resume_path,
+                      linkedin_data, github_data, resume_processed_data))
                 
                 user_id = cursor.lastrowid
                 await db.commit()
@@ -130,8 +146,11 @@ class DatabaseManager:
         """Authenticate user with name and login code"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
-                SELECT id, name, email, password_hash, linkedin_url, github_url, 
-                       skills, preferences, resume_filename, resume_path
+                SELECT id, name, email, password_hash, linkedin_url, github_url, portfolio_url,
+                       phone_number, location, bio, skills, preferences, work_mode, 
+                       experience_level, salary_min, salary_max, currency, resume_filename, 
+                       resume_path, linkedin_data, github_data, resume_processed_data, 
+                       profile_completed
                 FROM users 
                 WHERE LOWER(name) = LOWER(?) AND login_code = ?
             ''', (name, login_code))
@@ -147,10 +166,23 @@ class DatabaseManager:
                 "email": user[2],
                 "linkedin_url": user[4] or "",
                 "github_url": user[5] or "",
-                "skills": user[6],
-                "preferences": user[7].split(',') if user[7] else [],
-                "resume_filename": user[8] or "",
-                "resume_path": user[9] or ""
+                "portfolio_url": user[6] or "",
+                "phone_number": user[7] or "",
+                "location": user[8] or "",
+                "bio": user[9] or "",
+                "skills": user[10],
+                "preferences": user[11].split(',') if user[11] else [],
+                "work_mode": user[12] or "remote",
+                "experience_level": user[13] or "entry",
+                "salary_min": user[14],
+                "salary_max": user[15],
+                "currency": user[16] or "USD",
+                "resume_filename": user[17] or "",
+                "resume_path": user[18] or "",
+                "linkedin_data": user[19] or "",
+                "github_data": user[20] or "",
+                "resume_processed_data": user[21] or "",
+                "profile_completed": bool(user[22])
             }
             
             return user_data
@@ -211,6 +243,51 @@ class DatabaseManager:
                 }
                 for app in applications
             ]
+    
+    async def get_user_profile(self, user_id: int) -> Optional[Dict]:
+        """Get complete user profile by ID"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT id, name, email, linkedin_url, github_url, portfolio_url,
+                       phone_number, location, bio, skills, preferences, work_mode, 
+                       experience_level, salary_min, salary_max, currency, resume_filename, 
+                       resume_path, linkedin_data, github_data, resume_processed_data, 
+                       profile_completed, created_at, updated_at
+                FROM users 
+                WHERE id = ?
+            ''', (user_id,))
+            
+            user = await cursor.fetchone()
+            if not user:
+                return None
+            
+            # Convert to dictionary
+            return {
+                "id": user[0],
+                "name": user[1],
+                "email": user[2],
+                "linkedin_url": user[3] or "",
+                "github_url": user[4] or "",
+                "portfolio_url": user[5] or "",
+                "phone_number": user[6] or "",
+                "location": user[7] or "",
+                "bio": user[8] or "",
+                "skills": user[9],
+                "preferences": user[10].split(',') if user[10] else [],
+                "work_mode": user[11] or "remote",
+                "experience_level": user[12] or "entry",
+                "salary_min": user[13],
+                "salary_max": user[14],
+                "currency": user[15] or "USD",
+                "resume_filename": user[16] or "",
+                "resume_path": user[17] or "",
+                "linkedin_data": user[18] or "",
+                "github_data": user[19] or "",
+                "resume_processed_data": user[20] or "",
+                "profile_completed": bool(user[21]),
+                "created_at": user[22],
+                "updated_at": user[23]
+            }
 
 # Global database manager instance
 db_manager = DatabaseManager()
