@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom scrollbar for webkit browsers */
+@layer utilities {
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  .toast-enter {
+    opacity: 0;
+    transform: translateY(-100%);
+  }
+  
+  .toast-enter-active {
+    opacity: 1;
+    transform: translateY(0);
+    transition: all 0.3s ease-out;
+  }
+  
+  .toast-exit {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  
+  .toast-exit-active {
+    opacity: 0;
+    transform: translateY(-100%);
+    transition: all 0.3s ease-in;
+  }
+}
+
+/* Focus styles */
+@layer components {
+  .focus-ring {
+    @apply focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-white;
+  }
+  
+  .btn-primary {
+    @apply bg-primary-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-primary-700 focus-ring disabled:opacity-50 disabled:cursor-not-allowed transition-colors;
+  }
+  
+  .btn-secondary {
+    @apply bg-gray-100 text-gray-700 px-6 py-3 rounded-lg font-semibold hover:bg-gray-200 focus-ring disabled:opacity-50 disabled:cursor-not-allowed transition-colors;
+  }
+}
