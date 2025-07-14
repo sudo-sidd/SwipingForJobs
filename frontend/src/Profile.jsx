@@ -32,11 +32,13 @@ const Profile = ({ userData, onBack, onUpdate }) => {
   const [loading, setLoading] = useState(false)
   const [processingResume, setProcessingResume] = useState(false)
   const [applications, setApplications] = useState([])
+  const [projects, setProjects] = useState([])
   const [activeTab, setActiveTab] = useState('overview')
   const [resumeData, setResumeData] = useState(null)
 
   useEffect(() => {
     fetchApplications()
+    fetchProjects()
     // Parse resume data if available
     if (userData.resumeProcessedData) {
       try {
@@ -71,6 +73,31 @@ const Profile = ({ userData, onBack, onUpdate }) => {
       }
     } catch (error) {
       console.error('Error fetching applications:', error)
+    }
+  }
+
+  const fetchProjects = async () => {
+    try {
+      if (!sessionManager.isLoggedIn()) {
+        console.error('Not authenticated')
+        return
+      }
+      
+      const response = await fetch(`${API_BASE_URL}/users/projects/${userData.id}`, {
+        headers: sessionManager.getAuthHeaders()
+      })
+      
+      if (response.status === 401) {
+        console.error('Session expired')
+        return
+      }
+      
+      if (response.ok) {
+        const data = await response.json()
+        setProjects(data.projects)
+      }
+    } catch (error) {
+      console.error('Error fetching projects:', error)
     }
   }
 
@@ -156,6 +183,7 @@ const Profile = ({ userData, onBack, onUpdate }) => {
         setResumeData(result.processed_data)
         onUpdate(result.user) // Update parent component with new data
         sessionManager.updateUser(result.user) // Update session storage
+        fetchProjects() // Refresh projects after processing
         alert('Resume processed successfully! Check your profile for extracted information.')
       } else {
         const error = await response.json()
@@ -220,7 +248,7 @@ const Profile = ({ userData, onBack, onUpdate }) => {
 
       {/* Tab Navigation */}
       <div className="flex space-x-1 mb-6 bg-gray-100 p-1 rounded-lg">
-        {['overview', 'preferences', 'applications'].map((tab) => (
+        {['overview', 'preferences', 'projects', 'applications'].map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -232,6 +260,7 @@ const Profile = ({ userData, onBack, onUpdate }) => {
           >
             {tab === 'overview' && '👤 Overview'}
             {tab === 'preferences' && '⚙️ Preferences'}
+            {tab === 'projects' && '🚀 Projects'}
             {tab === 'applications' && '📋 Applications'}
           </button>
         ))}
@@ -620,6 +649,88 @@ const Profile = ({ userData, onBack, onUpdate }) => {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {activeTab === 'projects' && (
+        <div className="bg-white rounded-xl shadow-md p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">
+            Projects ({projects.length})
+          </h2>
+          {projects.length === 0 ? (
+            <div className="text-center py-8">
+              <p className="text-gray-500">No projects yet</p>
+              <p className="text-sm text-gray-400 mt-1">Process your resume to extract projects or add them manually</p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {projects.map((project, index) => (
+                <div key={index} className="border border-gray-200 rounded-lg p-6">
+                  <div className="flex justify-between items-start mb-4">
+                    <div>
+                      <h3 className="text-lg font-semibold text-gray-900">{project.project_name}</h3>
+                      {project.description && (
+                        <p className="text-sm text-gray-600 mt-1">{project.description}</p>
+                      )}
+                    </div>
+                    {project.featured && (
+                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+                        Featured
+                      </span>
+                    )}
+                  </div>
+                  
+                  {project.technologies && project.technologies.length > 0 && (
+                    <div className="mb-4">
+                      <h4 className="text-sm font-medium text-gray-700 mb-2">Technologies</h4>
+                      <div className="flex flex-wrap gap-2">
+                        {project.technologies.map((tech, techIndex) => (
+                          <span key={techIndex} className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-blue-50 text-blue-700">
+                            {tech}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="flex flex-wrap gap-4 text-sm text-gray-500">
+                    {project.start_date && (
+                      <span>Started: {new Date(project.start_date).toLocaleDateString()}</span>
+                    )}
+                    {project.end_date && (
+                      <span>Ended: {new Date(project.end_date).toLocaleDateString()}</span>
+                    )}
+                    {project.is_current && (
+                      <span className="text-green-600 font-medium">Current</span>
+                    )}
+                  </div>
+                  
+                  <div className="flex space-x-4 mt-4">
+                    {project.project_url && (
+                      <a
+                        href={project.project_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center text-sm text-primary-600 hover:text-primary-700"
+                      >
+                        🔗 View Project
+                      </a>
+                    )}
+                    {project.github_url && (
+                      <a
+                        href={project.github_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center text-sm text-primary-600 hover:text-primary-700"
+                      >
+                        📄 GitHub
+                      </a>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

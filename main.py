@@ -4,13 +4,13 @@ import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
+from contextlib import asynccontextmanager
 
 import httpx
 from google import genai
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request, Cookie
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -25,11 +25,21 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await db_manager.init_database()
+    logger.info("Database initialized successfully")
+    yield
+    # Shutdown
+    logger.info("Application shutting down")
+
 # Initialize FastAPI app
 app = FastAPI(
     title="SwipingForJobs Backend",
     description="Fetch job listings from RemoteOK and Gemini AI",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add CORS middleware to allow frontend connections
@@ -39,6 +49,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    allow_origin_regex=r"http://localhost:\d+",
 )
 
 # Configure Gemini AI
@@ -61,26 +72,117 @@ class UserRegistration(BaseModel):
     linkedin_url: str = ""
     github_url: str = ""
     skills: str
-    preferences: List[str]
+    preferences: List[str] = []  # For backward compatibility
+    job_types: List[str] = ["full-time"]  # full-time, part-time, internship, contract, etc.
 
 class UserLogin(BaseModel):
     name: str
     login_code: str
 
 class UserProfileUpdate(BaseModel):
+    # Contact & Basic Info
     linkedin_url: str = ""
     github_url: str = ""
     portfolio_url: str = ""
     phone_number: str = ""
     location: str = ""
     bio: str = ""
+    
+    # Skills
+    skills: str = ""
+    technical_skills: str = ""  # JSON format: {skill: proficiency_level}
+    soft_skills: str = ""  # JSON array
+    
+    # Job Preferences
+    job_function: str = ""
+    industry_preferences: str = ""  # JSON array
+    preferred_roles: str = ""  # JSON array
+    job_types: List[str] = []  # full-time, part-time, internship, contract, etc.
+    
+    # Work Mode
     work_mode: str = "remote"
-    experience_level: str = "entry"
+    relocation_willingness: bool = False
+    preferred_locations: str = ""  # JSON array
+    
+    # Experience
+    total_experience_years: int = 0
+    relevant_field_experience_years: int = 0
+    key_technologies: str = ""  # JSON array
+    managerial_experience: bool = False
+    
+    # Compensation
     salary_min: Optional[int] = None
     salary_max: Optional[int] = None
     currency: str = "USD"
-    skills: str = ""
-    preferences: List[str] = []
+    salary_negotiable: bool = True
+    compensation_type: str = "yearly"
+    
+    # Availability
+    notice_period: str = "2_weeks"
+    preferred_start_date: str = ""
+    work_authorization_status: str = ""
+    
+    # Languages
+    languages: str = ""  # JSON array
+    
+    # Job Search Preferences
+    job_search_status: str = "actively_looking"
+    preferred_communication: str = "email"
+    resume_visibility: str = "recruiters_only"
+    
+    # Cultural Fit
+    company_size_preference: str = ""  # JSON array
+    team_dynamics_preference: str = ""  # JSON array
+    work_culture_keywords: str = ""  # JSON array
+    
+    # Other
+    travel_willingness: str = "no"
+    security_clearance: str = ""
+    accessibility_needs: str = ""
+
+class EducationEntry(BaseModel):
+    degree: str
+    field_of_study: str = ""
+    institution: str
+    start_date: str  # YYYY-MM format
+    end_date: Optional[str] = None  # YYYY-MM format or None for ongoing
+    gpa: Optional[float] = None
+    location: str = ""
+    description: str = ""
+
+class CertificationEntry(BaseModel):
+    certification_name: str
+    issuer: str
+    year_achieved: Optional[int] = None
+    credential_id: str = ""
+    credential_url: str = ""
+    expiry_date: Optional[str] = None
+
+class WorkExperienceEntry(BaseModel):
+    job_title: str
+    company_name: str
+    start_date: str  # YYYY-MM format
+    end_date: Optional[str] = None  # YYYY-MM format or "current"
+    location: str = ""
+    work_mode: str = ""  # onsite, remote, hybrid
+    responsibilities: str = ""  # JSON array or text
+    achievements: str = ""  # JSON array or text
+    technologies_used: str = ""  # JSON array
+
+class InternshipEntry(BaseModel):
+    position_title: str
+    company_name: str
+    start_date: str  # YYYY-MM format
+    end_date: Optional[str] = None  # YYYY-MM format
+    location: str = ""
+    work_mode: str = ""  # onsite, remote, hybrid
+    internship_type: str = ""  # full-time, part-time, virtual, industrial_training
+    technologies_used: str = ""  # JSON array
+    responsibilities: str = ""  # JSON array or text
+    achievements: str = ""  # JSON array or text
+    stipend_amount: Optional[float] = None
+    stipend_currency: str = ""
+    certificate_url: str = ""
 
 class JobApplication(BaseModel):
     user_id: int
@@ -90,89 +192,68 @@ class JobApplication(BaseModel):
     job_source: str
     job_url: str = ""
 
-class SessionData(BaseModel):
-    user_id: int
-    email: str
-    name: str
-    expires_at: datetime
-
-# Security setup
-security = HTTPBearer(auto_error=False)
-
-# Session management functions
-def generate_session_token() -> str:
-    """Generate a secure session token"""
-    return secrets.token_urlsafe(32)
-
-async def create_session(user_id: int) -> Dict[str, Any]:
-    """Create a new session for a user"""
-    session_token = generate_session_token()
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)  # 7 days expiration
-    
-    await db_manager.create_session(user_id, session_token, expires_at)
-    
-    return {
-        "session_token": session_token,
-        "expires_at": expires_at.isoformat()
-    }
-
-async def get_current_user(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[Dict[str, Any]]:
-    """Get current user from session token"""
-    session_token = None
-    
-    # Try to get token from Authorization header
-    if credentials:
-        session_token = credentials.credentials
-    
-    # Try to get token from cookie as fallback
-    if not session_token:
-        session_token = request.cookies.get("session_token")
-    
-    if not session_token:
-        return None
-    
-    try:
-        session_data = await db_manager.get_session(session_token)
-        if not session_data:
-            return None
-        
-        # Check if session is expired
-        expires_at_str = session_data["expires_at"]
-        if isinstance(expires_at_str, str):
-            expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
-        else:
-            expires_at = datetime.fromisoformat(str(expires_at_str))
-            
-        # Ensure both datetimes have timezone info for comparison
-        now = datetime.now(timezone.utc)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-            
-        if expires_at < now:
-            await db_manager.delete_session(session_token)
-            return None
-        
-        return session_data
-    except Exception as e:
-        logger.error(f"Error getting current user: {str(e)}")
-        return None
-
-async def require_auth(current_user: Optional[Dict[str, Any]] = Depends(get_current_user)) -> Dict[str, Any]:
-    """Dependency that requires authentication"""
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    return current_user
-
 async def process_resume_with_gemini(file_path: str) -> Dict[str, Any]:
-    """Process resume file using Gemini AI to extract information"""
+    """Process resume file using Gemini AI to extract information with graceful fallbacks"""
+    # Return empty dict if no Gemini client available
     if not gemini_client:
-        logger.warning("Gemini client not available for resume processing")
+        logger.warning("Gemini client not available for resume processing - skipping AI analysis")
         return {}
     
     try:
-        # Read the resume file
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-            resume_content = file.read()
+        # Extract text from resume file based on file type
+        resume_content = ""
+        file_extension = file_path.lower().split('.')[-1]
+        
+        logger.info(f"Processing file: {file_path}, extension: {file_extension}")
+        
+        if file_extension == 'pdf':
+            try:
+                import PyPDF2
+                logger.info("Using PyPDF2 for PDF processing")
+                with open(file_path, 'rb') as file:
+                    pdf_reader = PyPDF2.PdfReader(file)
+                    logger.info(f"PDF has {len(pdf_reader.pages)} pages")
+                    for i, page in enumerate(pdf_reader.pages):
+                        page_text = page.extract_text()
+                        logger.info(f"Page {i+1} extracted {len(page_text)} characters")
+                        resume_content += page_text + "\n"
+            except ImportError:
+                logger.warning("PyPDF2 not installed, trying alternative PDF reading method")
+                try:
+                    import pdfplumber
+                    logger.info("Using pdfplumber for PDF processing")
+                    with pdfplumber.open(file_path) as pdf:
+                        logger.info(f"PDF has {len(pdf.pages)} pages")
+                        for i, page in enumerate(pdf.pages):
+                            text = page.extract_text()
+                            if text:
+                                logger.info(f"Page {i+1} extracted {len(text)} characters")
+                                resume_content += text + "\n"
+                except ImportError:
+                    logger.error("No PDF processing library available. Please install PyPDF2 or pdfplumber")
+                    return {}
+        elif file_extension in ['txt', 'md']:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+                resume_content = file.read()
+        elif file_extension in ['doc', 'docx']:
+            try:
+                import docx
+                doc = docx.Document(file_path)
+                resume_content = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            except ImportError:
+                logger.warning("python-docx not installed, cannot process Word documents")
+                return {}
+        else:
+            logger.warning(f"Unsupported file type: {file_extension}")
+            return {}
+        
+        logger.info(f"Total extracted content length: {len(resume_content)} characters")
+        logger.info(f"First 200 characters: {resume_content[:200]}")
+        
+        # Check if resume content is too short or empty
+        if not resume_content.strip() or len(resume_content.strip()) < 50:
+            logger.warning("Resume content too short or empty - skipping AI analysis")
+            return {}
         
         # Create prompt for resume analysis
         prompt = f"""
@@ -220,41 +301,86 @@ async def process_resume_with_gemini(file_path: str) -> Dict[str, Any]:
         Return only the JSON object, no additional text.
         """
         
-        # Generate response from Gemini
-        response = gemini_client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt
-        )
+        # Generate response from Gemini with timeout and retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Attempting Gemini API call (attempt {attempt + 1}/{max_retries})")
+                
+                response = gemini_client.models.generate_content(
+                    model="gemini-1.5-flash",
+                    contents=prompt
+                )
+                
+                if not response or not response.text:
+                    logger.warning(f"Empty response from Gemini API (attempt {attempt + 1})")
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        logger.error("All Gemini API attempts failed - empty response")
+                        return {}
+                
+                # Clean and parse the response
+                response_text = response.text.strip()
+                
+                # Remove markdown code blocks if present
+                if response_text.startswith("```json"):
+                    response_text = response_text[7:]
+                if response_text.startswith("```"):
+                    response_text = response_text[3:]
+                if response_text.endswith("```"):
+                    response_text = response_text[:-3]
+                
+                response_text = response_text.strip()
+                
+                # Parse JSON
+                try:
+                    processed_data = json.loads(response_text)
+                    logger.info(f"Successfully processed resume with Gemini (attempt {attempt + 1})")
+                    return processed_data
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse Gemini response as JSON (attempt {attempt + 1}): {str(e)}")
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        logger.error(f"All JSON parsing attempts failed. Response: {response_text[:200]}...")
+                        return {}
+                        
+            except Exception as api_error:
+                logger.warning(f"Gemini API error (attempt {attempt + 1}): {str(api_error)}")
+                
+                # Check for specific error types
+                if "403" in str(api_error) or "PERMISSION_DENIED" in str(api_error):
+                    logger.error("Gemini API permissions error - API not enabled or quota exceeded")
+                    return {}
+                elif "401" in str(api_error) or "UNAUTHORIZED" in str(api_error):
+                    logger.error("Gemini API authentication error - invalid API key")
+                    return {}
+                elif "429" in str(api_error) or "RATE_LIMIT" in str(api_error):
+                    logger.warning("Gemini API rate limit reached - skipping AI analysis")
+                    return {}
+                elif "500" in str(api_error) or "INTERNAL_ERROR" in str(api_error):
+                    logger.warning("Gemini API internal error - retrying...")
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        logger.error("All Gemini API retry attempts failed")
+                        return {}
+                else:
+                    logger.warning(f"Unknown Gemini API error: {str(api_error)}")
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        return {}
         
-        if not response.text:
-            logger.error("Empty response from Gemini API for resume processing")
-            return {}
-        
-        # Clean and parse the response
-        response_text = response.text.strip()
-        
-        # Remove markdown code blocks if present
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        
-        response_text = response_text.strip()
-        
-        # Parse JSON
-        try:
-            processed_data = json.loads(response_text)
-            logger.info(f"Successfully processed resume with Gemini")
-            return processed_data
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Gemini resume response as JSON: {str(e)}")
-            logger.error(f"Response text: {response_text[:500]}...")
-            return {}
+        logger.error("All Gemini API attempts exhausted")
+        return {}
             
+    except FileNotFoundError:
+        logger.error(f"Resume file not found: {file_path}")
+        return {}
     except Exception as e:
-        logger.error(f"Error processing resume with Gemini: {str(e)}")
+        logger.error(f"Unexpected error processing resume with Gemini: {str(e)}")
         return {}
 
 async def extract_linkedin_github_info(linkedin_url: str = "", github_url: str = "") -> Dict[str, str]:
@@ -287,43 +413,15 @@ async def extract_linkedin_github_info(linkedin_url: str = "", github_url: str =
         logger.error(f"Error extracting LinkedIn/GitHub info: {str(e)}")
         return {"linkedin_data": "", "github_data": ""}
 
-# Startup event to initialize database
-@app.on_event("startup")
-async def startup_event():
-    await db_manager.init_database()
-    # Clean up expired sessions on startup
-    await db_manager.cleanup_expired_sessions()
-    logger.info("Database initialized successfully")
-
-# Scheduled task to clean up expired sessions periodically
-import asyncio
-from threading import Thread
-
-def cleanup_sessions_periodically():
-    """Background task to clean up expired sessions"""
-    async def cleanup_loop():
-        while True:
-            try:
-                await db_manager.cleanup_expired_sessions()
-                logger.info("Cleaned up expired sessions")
-            except Exception as e:
-                logger.error(f"Error cleaning up sessions: {e}")
-            # Wait 1 hour before next cleanup
-            await asyncio.sleep(3600)
-    
-    # Run in background
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(cleanup_loop())
-
-# Start cleanup thread
-cleanup_thread = Thread(target=cleanup_sessions_periodically, daemon=True)
-cleanup_thread.start()
-
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {"message": "SwipingForJobs Backend API", "version": "1.0.0"}
+
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle all OPTIONS requests for CORS"""
+    return {"message": "OK"}
 
 @app.post("/users/register")
 async def register_user(
@@ -403,38 +501,31 @@ async def login_user(login_data: UserLogin):
         
         logger.info(f"User logged in: {user['email']}")
         
-        # Create session for the user
-        session_data = await create_session(user["id"])
-        
         return {
             "message": "Login successful",
             "user": {
                 "id": user["id"],
                 "name": user["name"],
                 "email": user["email"],
-                "linkedin_url": user["linkedin_url"],
-                "github_url": user["github_url"],
-                "portfolio_url": user["portfolio_url"],
-                "phone_number": user["phone_number"],
-                "location": user["location"],
-                "bio": user["bio"],
-                "skills": user["skills"],
-                "preferences": user["preferences"],
-                "work_mode": user["work_mode"],
-                "experience_level": user["experience_level"],
-                "salary_min": user["salary_min"],
-                "salary_max": user["salary_max"],
-                "currency": user["currency"],
-                "resume_filename": user["resume_filename"],
-                "linkedin_data": user["linkedin_data"],
-                "github_data": user["github_data"],
-                "resume_processed_data": user["resume_processed_data"],
-                "profile_completed": user["profile_completed"],
-                "has_resume": bool(user["resume_filename"])
-            },
-            "session": {
-                "token": session_data["session_token"],
-                "expires_at": session_data["expires_at"]
+                "linkedin_url": user.get("linkedin_url", ""),
+                "github_url": user.get("github_url", ""),
+                "portfolio_url": user.get("portfolio_url", ""),
+                "phone_number": user.get("phone_number", ""),
+                "location": user.get("location", ""),
+                "bio": user.get("bio", ""),
+                "skills": user.get("skills", ""),
+                "preferences": user.get("preferences", []),
+                "work_mode": user.get("work_mode", []),
+                "experience_level": user.get("experience_level", ""),
+                "salary_min": user.get("salary_min"),
+                "salary_max": user.get("salary_max"),
+                "currency": user.get("currency", "USD"),
+                "resume_filename": user.get("resume_filename", ""),
+                "linkedin_data": user.get("linkedin_data", ""),
+                "github_data": user.get("github_data", ""),
+                "resume_processed_data": user.get("resume_processed_data", ""),
+                "profile_completed": user.get("profile_completed", False),
+                "has_resume": bool(user.get("resume_filename"))
             }
         }
         
@@ -445,13 +536,9 @@ async def login_user(login_data: UserLogin):
         raise HTTPException(status_code=500, detail="Login failed")
 
 @app.get("/users/profile/{user_id}")
-async def get_user_profile(user_id: int, current_user: Dict[str, Any] = Depends(require_auth)):
-    """Get user profile by ID (authenticated users only)"""
-    try:
-        # Users can only view their own profile
-        if current_user["user_id"] != user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
+async def get_user_profile(user_id: int):
+    """Get user profile by ID"""
+    try:        
         profile = await db_manager.get_user_profile(user_id)
         
         if not profile:
@@ -477,20 +564,15 @@ async def get_user_profile(user_id: int, current_user: Dict[str, Any] = Depends(
 @app.put("/users/profile/{user_id}")
 async def update_user_profile(
     user_id: int,
-    profile_data: UserProfileUpdate,
-    current_user: Dict[str, Any] = Depends(require_auth)
+    profile_data: UserProfileUpdate
 ):
-    """Update user profile (authenticated users only)"""
-    try:
-        # Users can only update their own profile
-        if current_user["user_id"] != user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
+    """Update user profile"""
+    try:        
         # Convert to dict and handle preferences
         update_data = profile_data.dict()
         
         # Update in database
-        success = await db_manager.update_user(user_id, **update_data)
+        success = await db_manager.update_user_profile(user_id, **update_data)
         
         if not success:
             raise HTTPException(status_code=404, detail="User not found")
@@ -510,12 +592,9 @@ async def update_user_profile(
         raise HTTPException(status_code=500, detail="Failed to update profile")
 
 @app.post("/users/process-resume/{user_id}")
-async def process_user_resume(user_id: int, current_user: Dict[str, Any] = Depends(require_auth)):
-    """Process/reprocess user's resume with Gemini AI (authenticated users only)"""
+async def process_user_resume(user_id: int):
+    """Process/reprocess user's resume with Gemini AI"""
     try:
-        # Users can only process their own resume
-        if current_user["user_id"] != user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
         
         # Get user profile to find resume path
         profile = await db_manager.get_user_profile(user_id)
@@ -537,6 +616,8 @@ async def process_user_resume(user_id: int, current_user: Dict[str, Any] = Depen
         if not processed_data:
             raise HTTPException(status_code=500, detail="Failed to process resume")
         
+        logger.info(f"Processed data from Gemini: {processed_data}")
+        
         # Update user with processed data
         update_data = {
             "resume_processed_data": json.dumps(processed_data)
@@ -549,30 +630,70 @@ async def process_user_resume(user_id: int, current_user: Dict[str, Any] = Depen
             resume_skills = processed_data.get("skills", [])
             all_skills = list(set([s.strip() for s in existing_skills + resume_skills if s.strip()]))
             update_data["skills"] = ", ".join(all_skills)
+            logger.info(f"Updated skills: {update_data['skills']}")
         
         if processed_data.get("phone") and not profile.get("phone_number"):
             update_data["phone_number"] = processed_data["phone"]
+            logger.info(f"Updated phone: {update_data['phone_number']}")
             
         if processed_data.get("location") and not profile.get("location"):
             update_data["location"] = processed_data["location"]
+            logger.info(f"Updated location: {update_data['location']}")
             
         if processed_data.get("summary") and not profile.get("bio"):
             update_data["bio"] = processed_data["summary"]
+            logger.info(f"Updated bio: {update_data['bio'][:100]}...")
             
         if processed_data.get("linkedin") and not profile.get("linkedin_url"):
             update_data["linkedin_url"] = processed_data["linkedin"]
+            logger.info(f"Updated linkedin: {update_data['linkedin_url']}")
             
         if processed_data.get("github") and not profile.get("github_url"):
             update_data["github_url"] = processed_data["github"]
+            logger.info(f"Updated github: {update_data['github_url']}")
             
         if processed_data.get("portfolio") and not profile.get("portfolio_url"):
             update_data["portfolio_url"] = processed_data["portfolio"]
+            logger.info(f"Updated portfolio: {update_data['portfolio_url']}")
+        
+        logger.info(f"Final update_data: {update_data}")
         
         # Update the user profile
-        success = await db_manager.update_user(user_id, **update_data)
+        success = await db_manager.update_user_profile(user_id, **update_data)
+        
+        logger.info(f"Update success: {success}")
         
         if not success:
             raise HTTPException(status_code=500, detail="Failed to update user profile")
+        
+        # Process and save projects if they exist
+        if processed_data.get("projects"):
+            logger.info(f"Processing {len(processed_data['projects'])} projects")
+            
+            # Clear existing projects for this user (to avoid duplicates on re-processing)
+            await db_manager.clear_user_projects(user_id)
+            
+            # Add new projects
+            for project in processed_data["projects"]:
+                try:
+                    project_data = {
+                        'project_name': project.get('name', ''),
+                        'description': project.get('description', ''),
+                        'technologies': project.get('technologies', []),
+                        'project_url': project.get('url', ''),
+                        'github_url': project.get('github', ''),
+                        'start_date': project.get('start_date'),
+                        'end_date': project.get('end_date'),
+                        'is_current': project.get('is_current', False),
+                        'featured': False  # Can be set later by user
+                    }
+                    
+                    await db_manager.add_project(user_id, **project_data)
+                    logger.info(f"Added project: {project.get('name', '')}")
+                    
+                except Exception as e:
+                    logger.error(f"Error adding project {project.get('name', '')}: {str(e)}")
+                    continue
         
         # Get updated profile
         updated_profile = await db_manager.get_user_profile(user_id)
@@ -590,13 +711,9 @@ async def process_user_resume(user_id: int, current_user: Dict[str, Any] = Depen
         raise HTTPException(status_code=500, detail="Failed to process resume")
 
 @app.post("/users/apply")
-async def apply_to_job(application: JobApplication, current_user: Dict[str, Any] = Depends(require_auth)):
-    """Record job application (authenticated users only)"""
+async def apply_to_job(application: JobApplication):
+    """Record job application"""
     try:
-        # Verify the user is applying for themselves
-        if current_user["user_id"] != application.user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
         success = await db_manager.record_job_application(
             user_id=application.user_id,
             user_email=application.user_email,
@@ -624,13 +741,9 @@ async def apply_to_job(application: JobApplication, current_user: Dict[str, Any]
         raise HTTPException(status_code=500, detail="Failed to record application")
 
 @app.get("/users/applications/{user_id}")
-async def get_user_applications(user_id: int, current_user: Dict[str, Any] = Depends(require_auth)):
-    """Get all applications for a user (authenticated users only)"""
+async def get_user_applications(user_id: int):
+    """Get all applications for a user"""
     try:
-        # Users can only view their own applications
-        if current_user["user_id"] != user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
         applications = await db_manager.get_user_applications(user_id)
         
         return {
@@ -868,63 +981,74 @@ async def get_all_jobs():
     
     return results
 
-@app.post("/auth/logout")
-async def logout_user(current_user: Dict[str, Any] = Depends(require_auth), session_token: str = Cookie(None)):
-    """Logout user and invalidate session"""
+# Project endpoints
+@app.get("/users/projects/{user_id}")
+async def get_user_projects(user_id: int):
+    """Get all projects for a user"""
     try:
-        # Get session token from authorization header or cookie
-        token = session_token
-        if not token and hasattr(current_user, 'session_token'):
-            token = current_user.get('session_token')
-        
-        if token:
-            await db_manager.delete_session(token)
-        
-        return {"message": "Logged out successfully"}
-        
-    except Exception as e:
-        logger.error(f"Logout error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Logout failed")
-
-@app.get("/auth/me")
-async def get_current_user_info(current_user: Dict[str, Any] = Depends(require_auth)):
-    """Get current authenticated user information"""
-    try:
-        user = await db_manager.get_user_profile(current_user["user_id"])
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        projects = await db_manager.get_user_projects(user_id)
         
         return {
-            "user": user,
-            "session": {
-                "expires_at": current_user["expires_at"]
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Get current user error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to get user info")
-
-@app.post("/auth/refresh")
-async def refresh_session(current_user: Dict[str, Any] = Depends(require_auth)):
-    """Refresh user session"""
-    try:
-        # Delete old session
-        if hasattr(current_user, 'session_token'):
-            await db_manager.delete_session(current_user['session_token'])
-        
-        # Create new session
-        session_info = await create_session(current_user["user_id"])
-        
-        return {
-            "message": "Session refreshed successfully",
-            "session": {
-                "token": session_info["session_token"],
-                "expires_at": session_info["expires_at"]
-            }
+            "projects": projects,
+            "message": f"Found {len(projects)} projects"
         }
         
     except Exception as e:
-        logger.error(f"Refresh session error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to refresh session")
+        logger.error(f"Error getting projects: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get projects")
+
+@app.post("/users/projects/{user_id}")
+async def add_user_project(user_id: int, project_data: dict):
+    """Add a new project for a user"""
+    try:
+        success = await db_manager.add_project(user_id, **project_data)
+        
+        if success:
+            projects = await db_manager.get_user_projects(user_id)
+            return {
+                "message": "Project added successfully",
+                "projects": projects
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to add project")
+            
+    except Exception as e:
+        logger.error(f"Error adding project: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to add project")
+
+@app.put("/users/projects/{project_id}")
+async def update_user_project(project_id: int, project_data: dict):
+    """Update a project"""
+    try:
+        success = await db_manager.update_project(project_id, **project_data)
+        
+        if success:
+            return {
+                "message": "Project updated successfully"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update project")
+            
+    except Exception as e:
+        logger.error(f"Error updating project: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update project")
+
+@app.delete("/users/projects/{project_id}")
+async def delete_user_project(project_id: int):
+    """Delete a project"""
+    try:
+        success = await db_manager.delete_project(project_id)
+        
+        if success:
+            return {
+                "message": "Project deleted successfully"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete project")
+            
+    except Exception as e:
+        logger.error(f"Error deleting project: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete project")
+
+# Session endpoints removed as requested
+# User requested to remove all session system code
