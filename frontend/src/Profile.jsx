@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import sessionManager from './sessionManager'
+import GitHubIntegration from './GitHubIntegration'
 
 const API_BASE_URL = 'http://localhost:8000'
 
@@ -248,7 +249,7 @@ const Profile = ({ userData, onBack, onUpdate }) => {
 
       {/* Tab Navigation */}
       <div className="flex space-x-1 mb-6 bg-gray-100 p-1 rounded-lg">
-        {['overview', 'preferences', 'projects', 'applications'].map((tab) => (
+        {['overview', 'preferences', 'projects', 'github', 'applications'].map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -261,6 +262,7 @@ const Profile = ({ userData, onBack, onUpdate }) => {
             {tab === 'overview' && '👤 Overview'}
             {tab === 'preferences' && '⚙️ Preferences'}
             {tab === 'projects' && '🚀 Projects'}
+            {tab === 'github' && '💻 GitHub'}
             {tab === 'applications' && '📋 Applications'}
           </button>
         ))}
@@ -655,11 +657,77 @@ const Profile = ({ userData, onBack, onUpdate }) => {
       {activeTab === 'projects' && (
         <div className="bg-white rounded-xl shadow-md p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">
-            Projects ({projects.length})
+            Projects ({projects.length + (resumeData?.projects?.length || 0)})
           </h2>
+          {/* Resume-extracted projects */}
+          {resumeData?.projects?.length > 0 && (
+            <div className="mb-8">
+              <h3 className="text-md font-semibold text-gray-900 mb-2">Projects from Resume ({resumeData.projects.length})</h3>
+              <div className="space-y-6">
+                {resumeData.projects.map((project, index) => (
+                  <div key={index} className="border border-blue-100 rounded-lg p-6 bg-blue-50">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <h4 className="text-lg font-semibold text-blue-900">{project.name}</h4>
+                        {project.description && (
+                          <p className="text-sm text-blue-700 mt-1">{project.description}</p>
+                        )}
+                      </div>
+                    </div>
+                    {project.technologies && project.technologies.length > 0 && (
+                      <div className="mb-2">
+                        <h4 className="text-sm font-medium text-blue-700 mb-1">Technologies</h4>
+                        <div className="flex flex-wrap gap-2">
+                          {project.technologies.map((tech, techIndex) => (
+                            <span key={techIndex} className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-blue-100 text-blue-700">
+                              {tech}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex flex-wrap gap-4 text-sm text-blue-700">
+                      {project.start_date && (
+                        <span>Started: {project.start_date}</span>
+                      )}
+                      {project.end_date && (
+                        <span>Ended: {project.end_date}</span>
+                      )}
+                      {project.is_current && (
+                        <span className="text-green-600 font-medium">Current</span>
+                      )}
+                    </div>
+                    <div className="flex space-x-4 mt-2">
+                      {project.url && (
+                        <a
+                          href={project.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center text-sm text-primary-600 hover:text-primary-700"
+                        >
+                          🔗 View Project
+                        </a>
+                      )}
+                      {project.github && (
+                        <a
+                          href={project.github}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center text-sm text-primary-600 hover:text-primary-700"
+                        >
+                          📄 GitHub
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* DB projects */}
           {projects.length === 0 ? (
             <div className="text-center py-8">
-              <p className="text-gray-500">No projects yet</p>
+              <p className="text-gray-500">No database projects yet</p>
               <p className="text-sm text-gray-400 mt-1">Process your resume to extract projects or add them manually</p>
             </div>
           ) : (
@@ -679,7 +747,6 @@ const Profile = ({ userData, onBack, onUpdate }) => {
                       </span>
                     )}
                   </div>
-                  
                   {project.technologies && project.technologies.length > 0 && (
                     <div className="mb-4">
                       <h4 className="text-sm font-medium text-gray-700 mb-2">Technologies</h4>
@@ -692,7 +759,6 @@ const Profile = ({ userData, onBack, onUpdate }) => {
                       </div>
                     </div>
                   )}
-                  
                   <div className="flex flex-wrap gap-4 text-sm text-gray-500">
                     {project.start_date && (
                       <span>Started: {new Date(project.start_date).toLocaleDateString()}</span>
@@ -704,7 +770,6 @@ const Profile = ({ userData, onBack, onUpdate }) => {
                       <span className="text-green-600 font-medium">Current</span>
                     )}
                   </div>
-                  
                   <div className="flex space-x-4 mt-4">
                     {project.project_url && (
                       <a
@@ -731,6 +796,12 @@ const Profile = ({ userData, onBack, onUpdate }) => {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {activeTab === 'github' && (
+        <div className="bg-white rounded-xl shadow-md p-6">
+          <GitHubIntegration userId={userData.id} />
         </div>
       )}
 

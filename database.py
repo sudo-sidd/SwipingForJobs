@@ -4,7 +4,7 @@ import random
 import bcrypt
 import json
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
 DATABASE_PATH = "swipingforjobs.db"
 RESUME_UPLOAD_DIR = "uploaded_resumes"
@@ -41,6 +41,12 @@ class DatabaseManager:
                     location TEXT,
                     bio TEXT,
                     profile_picture_url TEXT,
+                    
+                    -- GitHub OAuth Integration
+                    github_id TEXT UNIQUE,
+                    github_access_token TEXT, -- Encrypted
+                    github_username TEXT,
+                    github_oauth_linked_at TIMESTAMP,
                     
                     -- Job Type Preferences
                     job_types TEXT, -- JSON array: ["full-time", "part-time", "internship", "contract", "freelance", "apprenticeship", "volunteer", "temporary"]
@@ -241,9 +247,84 @@ class DatabaseManager:
                     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
                 )
             ''')
-            
+
+            # Create GitHub repositories table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS github_repos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    github_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    full_name TEXT NOT NULL,
+                    description TEXT,
+                    url TEXT NOT NULL,
+                    clone_url TEXT,
+                    language TEXT,
+                    stars INTEGER DEFAULT 0,
+                    forks INTEGER DEFAULT 0,
+                    is_fork BOOLEAN DEFAULT 0,
+                    is_private BOOLEAN DEFAULT 0,
+                    created_at TIMESTAMP,
+                    updated_at TIMESTAMP,
+                    last_synced TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    topics TEXT, -- JSON array
+                    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+                    UNIQUE(user_id, github_id)
+                )
+            ''')
+
+            # Create GitHub repository languages table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS github_languages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo_id INTEGER NOT NULL,
+                    language TEXT NOT NULL,
+                    bytes INTEGER DEFAULT 0,
+                    percentage REAL DEFAULT 0.0,
+                    FOREIGN KEY (repo_id) REFERENCES github_repos (id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Create GitHub repository README table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS github_readmes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo_id INTEGER NOT NULL,
+                    content TEXT,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (repo_id) REFERENCES github_repos (id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Create job applications table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS job_applications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    user_email TEXT NOT NULL,
+                    job_title TEXT NOT NULL,
+                    company TEXT NOT NULL,
+                    job_source TEXT NOT NULL,
+                    job_url TEXT,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id)
+                )
+            ''')
+
+            # Create jobs cache table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS jobs_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    job_data TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP NOT NULL
+                )
+            ''')
+
             # Create indexes for better performance
             await db.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_users_github_id ON users(github_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_token ON user_sessions(session_token)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(expires_at)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_education_user ON user_education(user_id)")
@@ -251,12 +332,16 @@ class DatabaseManager:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_work_experience_user ON user_work_experience(user_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_internships_user ON user_internships(user_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_projects_user ON user_projects(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_github_repos_user ON github_repos(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_github_repos_github_id ON github_repos(github_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_github_languages_repo ON github_languages(repo_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_github_readmes_repo ON github_readmes(repo_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_users_job_search_status ON users(job_search_status)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_users_work_mode ON users(work_mode)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_users_location ON users(location)")
             
             await db.commit()
-            print("✅ Database initialized with enhanced schema")
+            print("✅ Database initialized with enhanced schema including GitHub OAuth tables")
 
     async def create_user(self, **kwargs):
         """Create a new user with enhanced profile data"""
@@ -761,6 +846,199 @@ class DatabaseManager:
             await db.execute("DELETE FROM user_projects WHERE user_id = ?", (user_id,))
             await db.commit()
             return True
+
+    # GitHub OAuth Methods
+    async def link_github_account(self, user_id: int, github_id: str, github_access_token: str, github_username: str):
+        """Link a GitHub account to a user"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                # Check if GitHub account is already linked to another user
+                cursor = await db.execute("SELECT id FROM users WHERE github_id = ? AND id != ?", (github_id, user_id))
+                existing_user = await cursor.fetchone()
+                
+                if existing_user:
+                    raise ValueError("GitHub account is already linked to another user")
+                
+                # Update user with GitHub information
+                await db.execute("""
+                    UPDATE users 
+                    SET github_id = ?, github_access_token = ?, github_username = ?, 
+                        github_oauth_linked_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (github_id, github_access_token, github_username, user_id))
+                
+                await db.commit()
+                return True
+                
+            except Exception as e:
+                await db.rollback()
+                raise e
+
+    async def unlink_github_account(self, user_id: int):
+        """Unlink GitHub account from a user"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE users 
+                SET github_id = NULL, github_access_token = NULL, github_username = NULL,
+                    github_oauth_linked_at = NULL
+                WHERE id = ?
+            """, (user_id,))
+            
+            # Also clear associated GitHub data
+            await db.execute("DELETE FROM github_repos WHERE user_id = ?", (user_id,))
+            await db.commit()
+            return True
+
+    async def get_user_github_info(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get GitHub information for a user"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT github_id, github_access_token, github_username, github_oauth_linked_at
+                FROM users WHERE id = ?
+            """, (user_id,))
+            
+            row = await cursor.fetchone()
+            if row and row[0]:  # github_id exists
+                return {
+                    'github_id': row[0],
+                    'github_access_token': row[1],
+                    'github_username': row[2],
+                    'github_oauth_linked_at': row[3]
+                }
+            return None
+
+    async def get_user_by_github_id(self, github_id: str) -> Optional[Dict[str, Any]]:
+        """Get user by GitHub ID"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT * FROM users WHERE github_id = ?", (github_id,))
+            user = await cursor.fetchone()
+            
+            if user:
+                columns = [description[0] for description in cursor.description]
+                return dict(zip(columns, user))
+            return None
+
+    async def store_github_repos(self, user_id: int, repos_data: List[Dict[str, Any]]):
+        """Store GitHub repositories for a user"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                # Clear existing repos for this user
+                await db.execute("DELETE FROM github_repos WHERE user_id = ?", (user_id,))
+                
+                for repo_data in repos_data:
+                    # Insert repository
+                    cursor = await db.execute("""
+                        INSERT INTO github_repos (
+                            user_id, github_id, name, full_name, description, url, clone_url,
+                            language, stars, forks, is_fork, is_private, created_at, updated_at, topics
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        user_id,
+                        repo_data['github_id'],
+                        repo_data['name'],
+                        repo_data['full_name'],
+                        repo_data.get('description', ''),
+                        repo_data['url'],
+                        repo_data.get('clone_url', ''),
+                        repo_data.get('language', ''),
+                        repo_data.get('stars', 0),
+                        repo_data.get('forks', 0),
+                        repo_data.get('is_fork', False),
+                        repo_data.get('is_private', False),
+                        repo_data.get('created_at', ''),
+                        repo_data.get('updated_at', ''),
+                        json.dumps(repo_data.get('topics', []))
+                    ))
+                    
+                    repo_id = cursor.lastrowid
+                    
+                    # Insert languages
+                    languages = repo_data.get('languages', {})
+                    if languages:
+                        total_bytes = sum(languages.values())
+                        for language, bytes_count in languages.items():
+                            percentage = (bytes_count / total_bytes) * 100 if total_bytes > 0 else 0
+                            await db.execute("""
+                                INSERT INTO github_languages (repo_id, language, bytes, percentage)
+                                VALUES (?, ?, ?, ?)
+                            """, (repo_id, language, bytes_count, percentage))
+                    
+                    # Insert README
+                    readme_content = repo_data.get('readme')
+                    if readme_content:
+                        await db.execute("""
+                            INSERT INTO github_readmes (repo_id, content)
+                            VALUES (?, ?)
+                        """, (repo_id, readme_content))
+                
+                await db.commit()
+                return True
+                
+            except Exception as e:
+                await db.rollback()
+                raise e
+
+    async def get_github_repos(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get GitHub repositories for a user"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT r.*, 
+                       GROUP_CONCAT(l.language || ':' || l.bytes || ':' || l.percentage, '|') as languages,
+                       rm.content as readme
+                FROM github_repos r
+                LEFT JOIN github_languages l ON r.id = l.repo_id
+                LEFT JOIN github_readmes rm ON r.id = rm.repo_id
+                WHERE r.user_id = ?
+                GROUP BY r.id
+                ORDER BY r.updated_at DESC
+            """, (user_id,))
+            
+            repos = []
+            rows = await cursor.fetchall()
+            
+            for row in rows:
+                # Convert to dict
+                columns = [description[0] for description in cursor.description]
+                repo_dict = dict(zip(columns, row))
+                
+                # Parse languages
+                languages = {}
+                if repo_dict.get('languages'):
+                    for lang_data in repo_dict['languages'].split('|'):
+                        if ':' in lang_data:
+                            parts = lang_data.split(':')
+                            if len(parts) >= 3:
+                                languages[parts[0]] = {
+                                    'bytes': int(parts[1]),
+                                    'percentage': float(parts[2])
+                                }
+                
+                repo_dict['languages'] = languages
+                repo_dict['topics'] = json.loads(repo_dict.get('topics', '[]'))
+                del repo_dict['languages']  # Remove the raw concatenated string
+                
+                repos.append(repo_dict)
+            
+            return repos
+
+    async def update_github_token(self, user_id: int, new_token: str):
+        """Update GitHub access token for a user"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE users 
+                SET github_access_token = ?
+                WHERE id = ?
+            """, (new_token, user_id))
+            
+            await db.commit()
+            return True
+
+    async def clear_invalid_github_tokens(self):
+        """Clear invalid GitHub tokens (called when tokens are revoked)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # This method can be called by a background job to clear invalid tokens
+            # For now, we'll just provide the framework
+            pass
 
 # Global database manager instance
 db_manager = DatabaseManager()

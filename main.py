@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 # Import our database and file management modules
 from database import db_manager
 from file_manager import file_manager
+from github_oauth import github_oauth_service
 
 # Load environment variables
 load_dotenv()
@@ -1049,6 +1050,273 @@ async def delete_user_project(project_id: int):
     except Exception as e:
         logger.error(f"Error deleting project: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete project")
+
+# ========================================
+# GitHub OAuth Endpoints
+# ========================================
+
+@app.get("/auth/github/login")
+async def github_login():
+    """Initiate GitHub OAuth login"""
+    try:
+        # Generate state parameter for security
+        state = secrets.token_urlsafe(32)
+        
+        # Store state in session or cache (for production, use Redis)
+        # For simplicity, we'll validate in callback
+        
+        auth_url = github_oauth_service.generate_auth_url(state)
+        
+        return {
+            "auth_url": auth_url,
+            "state": state
+        }
+        
+    except Exception as e:
+        logger.error(f"GitHub login error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to initiate GitHub OAuth")
+
+@app.get("/auth/github/callback")
+async def github_callback(code: str, state: str = None):
+    """Handle GitHub OAuth callback"""
+    try:
+        # In production, validate state parameter
+        if not code:
+            raise HTTPException(status_code=400, detail="Authorization code is required")
+        
+        # Exchange code for access token
+        token_data = await github_oauth_service.exchange_code_for_token(code)
+        access_token = token_data.get('access_token')
+        
+        if not access_token:
+            raise HTTPException(status_code=400, detail="Failed to obtain access token")
+        
+        # Get user info from GitHub
+        github_user = await github_oauth_service.get_user_info(access_token)
+        github_id = str(github_user['id'])
+        github_username = github_user['login']
+        
+        # Check if GitHub account is already linked to a user
+        existing_user = await db_manager.get_user_by_github_id(github_id)
+        
+        if existing_user:
+            # User exists, update token and return user info
+            encrypted_token = github_oauth_service.encrypt_token(access_token)
+            await db_manager.update_github_token(existing_user['id'], encrypted_token)
+            
+            return {
+                "message": "GitHub account linked successfully",
+                "user": {
+                    "id": existing_user['id'],
+                    "name": existing_user['name'],
+                    "email": existing_user['email'],
+                    "github_username": github_username
+                },
+                "github_linked": True
+            }
+        else:
+            # Return GitHub user info for frontend to handle linking
+            return {
+                "message": "GitHub authentication successful",
+                "github_user": {
+                    "id": github_id,
+                    "username": github_username,
+                    "name": github_user.get('name', ''),
+                    "email": github_user.get('email', ''),
+                    "avatar_url": github_user.get('avatar_url', ''),
+                    "bio": github_user.get('bio', ''),
+                    "company": github_user.get('company', ''),
+                    "location": github_user.get('location', ''),
+                    "blog": github_user.get('blog', ''),
+                    "public_repos": github_user.get('public_repos', 0)
+                },
+                "access_token": access_token,  # Don't expose in production
+                "github_linked": False
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GitHub callback error: {str(e)}")
+        raise HTTPException(status_code=500, detail="GitHub OAuth callback failed")
+
+@app.post("/auth/github/link")
+async def link_github_account(
+    user_id: int,
+    github_id: str,
+    access_token: str,
+    github_username: str
+):
+    """Link GitHub account to existing user"""
+    try:
+        # Validate that user exists
+        user = await db_manager.get_user_profile(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check if GitHub account is already linked
+        existing_user = await db_manager.get_user_by_github_id(github_id)
+        if existing_user and existing_user['id'] != user_id:
+            raise HTTPException(status_code=400, detail="GitHub account is already linked to another user")
+        
+        # Encrypt and store access token
+        encrypted_token = github_oauth_service.encrypt_token(access_token)
+        
+        # Link the GitHub account
+        await db_manager.link_github_account(user_id, github_id, encrypted_token, github_username)
+        
+        # Fetch and store initial repository data
+        await github_oauth_service.refresh_user_repos(access_token, user_id)
+        
+        return {
+            "message": "GitHub account linked successfully",
+            "github_username": github_username
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GitHub link error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to link GitHub account")
+
+@app.post("/auth/github/unlink/{user_id}")
+async def unlink_github_account(user_id: int):
+    """Unlink GitHub account from user"""
+    try:
+        # Validate that user exists
+        user = await db_manager.get_user_profile(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Unlink the GitHub account
+        await db_manager.unlink_github_account(user_id)
+        
+        return {
+            "message": "GitHub account unlinked successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GitHub unlink error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to unlink GitHub account")
+
+@app.get("/auth/github/repos/{user_id}")
+async def get_github_repos(user_id: int):
+    """Get user's GitHub repositories"""
+    try:
+        # Validate that user exists
+        user = await db_manager.get_user_profile(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get GitHub repositories
+        repos = await db_manager.get_github_repos(user_id)
+        
+        return {
+            "repos": repos,
+            "repos_count": len(repos)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GitHub repos error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch GitHub repositories")
+
+@app.post("/auth/github/refresh/{user_id}")
+async def refresh_github_data(user_id: int):
+    """Refresh user's GitHub repository data"""
+    try:
+        # Validate that user exists
+        user = await db_manager.get_user_profile(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get GitHub info
+        github_info = await db_manager.get_user_github_info(user_id)
+        if not github_info:
+            raise HTTPException(status_code=400, detail="GitHub account not linked")
+        
+        # Decrypt access token
+        encrypted_token = github_info['github_access_token']
+        access_token = github_oauth_service.decrypt_token(encrypted_token)
+        
+        # Validate token
+        if not await github_oauth_service.validate_token(access_token):
+            raise HTTPException(status_code=401, detail="GitHub token is invalid or expired")
+        
+        # Refresh repository data
+        result = await github_oauth_service.refresh_user_repos(access_token, user_id)
+        
+        if result['success']:
+            return {
+                "message": "GitHub data refreshed successfully",
+                "repos_count": result['repos_count']
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to refresh GitHub data: {result['error']}")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GitHub refresh error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to refresh GitHub data")
+
+@app.get("/auth/github/status/{user_id}")
+async def github_status(user_id: int):
+    """Get GitHub integration status for user"""
+    try:
+        # Validate that user exists
+        user = await db_manager.get_user_profile(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get GitHub info
+        github_info = await db_manager.get_user_github_info(user_id)
+        
+        if github_info:
+            # Get repositories count
+            repos = await db_manager.get_github_repos(user_id)
+            
+            return {
+                "github_linked": True,
+                "github_username": github_info['github_username'],
+                "linked_at": github_info['github_oauth_linked_at'],
+                "repos_count": len(repos)
+            }
+        else:
+            return {
+                "github_linked": False,
+                "github_username": None,
+                "linked_at": None,
+                "repos_count": 0
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GitHub status error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get GitHub status")
+
+# ========================================
+# Background Job Endpoints (Future Extension)
+# ========================================
+
+@app.post("/jobs/github-sync")
+async def trigger_github_sync():
+    """Trigger background job to sync GitHub data for all users"""
+    try:
+        # This would trigger a Celery task in production
+        # For now, just return a placeholder response
+        return {
+            "message": "GitHub sync job triggered successfully",
+            "job_id": "placeholder_job_id"
+        }
+        
+    except Exception as e:
+        logger.error(f"GitHub sync trigger error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to trigger GitHub sync")
 
 # Session endpoints removed as requested
 # User requested to remove all session system code

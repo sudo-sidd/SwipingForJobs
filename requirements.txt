@@ -6,3 +6,13 @@ python-dotenv
 aiosqlite
 bcrypt
 python-multipart
+python-docx
+# GitHub OAuth and encryption dependencies
+authlib
+itsdangerous
+cryptography
+# Background job processing
+celery
+redis
+# Additional security
+pyjwt
